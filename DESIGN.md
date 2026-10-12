@@ -22,7 +22,9 @@
 
 `TransformerConfig(vocab_size=16, d_model=8, num_heads=2, d_ff=16, num_encoder_layers=1, num_decoder_layers=1, max_len=32, pad_id=0, eps=1e-5)`；必须校验正整数、head 整除、PAD 范围、eps 有限且为正。
 
-`Transformer(config)`：`forward(src, tgt) -> logits[B,T,V]`；`forward_with_trace(src,tgt) -> (logits, dict[str, Tensor])` 返回 `encoder_output` 与 `decoder_output`；`greedy_decode(src,bos_id,eos_id,max_new_tokens) -> tokens[B,L]`，L 包含 BOS，已结束样本后续补 PAD。
+`Transformer(config)`：`forward(src, tgt) -> logits[B,T,V]`；`forward_with_trace(src,tgt) -> (logits, dict[str, Tensor])` 返回每层 `encoder.{i}.output`、`decoder.{i}.output` 及最终 `encoder_output`、`decoder_output`；`greedy_decode(src,bos_id,eos_id,max_new_tokens) -> tokens[B,L]`，L 包含 BOS，已结束样本后续补 PAD。
+
+BOS/EOS 必须在词表内、彼此不同且不同于 PAD；生成预算非负，且 `max_new_tokens+1 <= max_len`。零步生成仅返回 BOS。两个 CLI 默认 BOS=1、EOS=2、生成预算=8、训练步数=100；零步训练校验并另存原权重，负步数拒绝。
 
 `masked_cross_entropy(logits, labels, pad_id) -> scalar Tensor`。
 
@@ -59,7 +61,7 @@ value_0 value_1 ... value_{numel-1}
 ...repeat records...
 ```
 
-rank 取 1..4；dims 必须正，values 为连续 row-major double。禁止重复名字、截断、额外尾部 token。文件读取设置合理的元素数量上限以拒绝错误尺寸。整数概念用 double 存储，但读取后必须精确整数且校验范围。
+rank 取 1..4；dims 必须正，values 为连续 row-major double。禁止重复名字、截断、额外尾部 token。文件及模型参数元素上限为 10,000,000，记录上限 10,000，文件上限 256 MiB，每个 token/名字上限 1024 UTF-8 字节。整数概念用 double 存储，但读取后必须精确整数且校验范围。`make_case` 深拷贝数值，以免模型后续更新改变导出快照。
 
 输入 case 除全部权重外，包含：
 
@@ -85,7 +87,7 @@ inspect 从原始权重做 forward、backward、一次 SGD，输出 `logits`, `l
 
 1. Python 独立测试：attention 公式、causal 无信息泄漏、PAD 屏蔽、cross attention、位置编码、无效输入、反传、复制任务 loss 下降及生成。
 2. C++ 独立测试：基础算子的中央差分梯度、DAG 梯度累加、mask 和文件/配置错误；训练与生成可运行。
-3. `verify.py` 生成固定种子且有 padding 的多个 case（包含两层和不同长度）。比较每层边界结果、logits、loss、**所有参数梯度**、一次 SGD 所有权重，容差 atol=1e-9、rtol=1e-8；生成结果精确一致。抽样模型参数的有限差分为第三种校验。
+3. `verify.py` 生成六个固定种子的 case，涵盖 padding、两层、多头、不同长度、奇数 D、非零 PAD 与单 token。比较每层边界结果、logits、loss、**所有参数梯度**、一次 SGD 所有权重，容差 atol=1e-9、rtol=1e-8；12 步训练及 checkpoint 互读、EOS 与混合结束时间下的 PAD 行为都须一致。每个 case 抽样 8 个模型参数的有限差分，并用独立的 PyTorch 官方 encoder/decoder 层核对前向。12 个错误 case 在两端都须明确拒绝。
 4. 锁定 uv 依赖，lint/format、CTest、跨实现验证进入 GitHub Actions。
 5. 中文学习指南解释形状、公式、反向传播、文件格式、阅读顺序与实验；每个子目录有独立运行指引。
 6. 独立 Git 仓库，main，MIT license，忽略构建产物与环境；有清晰分阶段提交，并创建用户账户下公开远程仓库并推送。

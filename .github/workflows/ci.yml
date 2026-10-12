@@ -1,0 +1,35 @@
+name: Verify both Transformer implementations
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  numerical-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.23"
+          enable-cache: true
+          cache-dependency-glob: python/uv.lock
+      - name: Install the locked Python environment
+        run: uv sync --locked --project python
+      - name: Lint, independent tests and numerical parity
+        run: make check
+      - name: Run the copy-task learning demo
+        run: make demo
+      - name: Check C++ memory and undefined behavior
+        run: |
+          cmake -S cpp -B cpp/build-sanitize -DCMAKE_BUILD_TYPE=Debug -DTLAB_ENABLE_SANITIZERS=ON
+          cmake --build cpp/build-sanitize --parallel 2
+          ctest --test-dir cpp/build-sanitize --output-on-failure
