@@ -2,6 +2,8 @@
 
 2026-10-12 在 Linux x86_64 上运行，Python 3.12.14、PyTorch 2.8.0+cpu、uv 0.12.23、GCC 11.4.0、CMake 3.22.1。依赖来自提交的 `python/uv.lock`，浮点为 float64/double，未启用 fast-math。
 
+[GitHub Actions 独立验证](https://github.com/Creeken-Harrans/transformer-pytorch-cpp-lab/actions/runs/38272236845) 已通过：从远程克隆、锁定环境安装、lint、两端测试、数值一致性、复制任务与 sanitizer 都成功。测试提交为 `db8ecaf`；之后的提交仅补充这份交付记录与计划完成状态。
+
 ## 可复现入口
 
 ```bash

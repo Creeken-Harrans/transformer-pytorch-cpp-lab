@@ -41,4 +41,6 @@ Post-LN、float64、dropout=0、SGD、PAD key 和 label masks、共享参数名�
 - [x] 写 verify.py，逐权重比较 forward/backward/SGD，加入 padded/multilayer cases 与生成。
 - [x] 添加 CI、gitignore；运行 uv 锁定检查、lint、Python 测试、C++ 测试、parity 与训练示例。
 - [x] 独立审阅实现和文档，修复发现的问题并重跑相关验证。
-- [ ] 建立分阶段 Git 提交、创建公开 GitHub 仓库、推送并核验远端可访问及工作区干净。
+- [x] 建立分阶段 Git 提交、创建公开 GitHub 仓库、推送并核验远端可访问及工作区干净。
+
+交付验证：本地 `make check`、`make demo`、ASan/UBSan 全通过；[远程 GitHub Actions](https://github.com/Creeken-Harrans/transformer-pytorch-cpp-lab/actions/runs/38272236845) 全通过。公开仓库为 [transformer-pytorch-cpp-lab](https://github.com/Creeken-Harrans/transformer-pytorch-cpp-lab)。
