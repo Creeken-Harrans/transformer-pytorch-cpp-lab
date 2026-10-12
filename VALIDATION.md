@@ -6,6 +6,8 @@
 
 新增 `make help`、`make walkthrough`，默认验证结果改为检查表。`verify.py --json` 输出可解析的完整 JSON；`--json-output` 在普通验证与复制任务验证中都保存报告，修复了复制任务忽略该参数的问题。
 
+[本次 GitHub Actions 验证](https://github.com/Creeken-Harrans/transformer-pytorch-cpp-lab/actions/runs/38277128275) 已通过，测试提交为 `919e553`。远程从克隆与依赖安装开始，完成 lint、两端测试、数值对照、复制任务、单步学习示例与 sanitizer 检查。之后仅补充此链接和命令排版。
+
 | 本次检查 | 实测结果 |
 | --- | --- |
 | `make check` | lint、98 项 Python 测试、3 组 CTest、六个数值 case 全部通过 |

@@ -66,17 +66,22 @@ make walkthrough
 
 ```bash
 mkdir -p .artifacts
-uv run --locked --project python transformer-lab export .artifacts/case.tlab --task copy --seed 7 --batch-size 2 --sequence-length 4 --learning-rate 0.1
-uv run --locked --project python transformer-lab inspect .artifacts/case.tlab .artifacts/python-result.tlab
-uv run --locked --project python transformer-lab train .artifacts/case.tlab .artifacts/python-checkpoint.tlab --steps 300
+uv run --locked --project python transformer-lab export .artifacts/case.tlab \
+  --task copy --seed 7 --batch-size 2 --sequence-length 4 --learning-rate 0.1
+uv run --locked --project python transformer-lab inspect \
+  .artifacts/case.tlab .artifacts/python-result.tlab
+uv run --locked --project python transformer-lab train \
+  .artifacts/case.tlab .artifacts/python-checkpoint.tlab --steps 300
 
 make build
 cpp/build/transformer_cpp inspect .artifacts/case.tlab .artifacts/cpp-result.tlab
 cpp/build/transformer_cpp train .artifacts/case.tlab .artifacts/cpp-checkpoint.tlab --steps 300
 
 # 交叉读取训练后的权重
-uv run --locked --project python transformer-lab generate .artifacts/cpp-checkpoint.tlab --bos 1 --eos 2 --max-new-tokens 8
-cpp/build/transformer_cpp generate .artifacts/python-checkpoint.tlab --bos 1 --eos 2 --max-new-tokens 8
+uv run --locked --project python transformer-lab generate \
+  .artifacts/cpp-checkpoint.tlab --bos 1 --eos 2 --max-new-tokens 8
+cpp/build/transformer_cpp generate .artifacts/python-checkpoint.tlab \
+  --bos 1 --eos 2 --max-new-tokens 8
 ```
 
 `inspect` 保存中间输出、`logits`、`loss`、`grad.*` 和 `updated.*`，用于逐项核对。训练与生成读取原始 case 或 `train` 保存的 checkpoint。全部参数与指令见 [Python 运行说明](python/README.md) 和 [C++ 运行说明](cpp/README.md)。
