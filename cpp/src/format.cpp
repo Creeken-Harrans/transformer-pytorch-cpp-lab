@@ -11,16 +11,19 @@
 namespace tlab {
 namespace {
 constexpr std::size_t max_values = 10000000, max_records = 10000, max_bytes = 256 * 1024 * 1024;
+
 void require(bool okay, const std::string &message) {
     if (!okay)
         throw std::invalid_argument(message);
 }
+
 std::string token(std::istream &input, const std::string &description) {
     std::string result;
     require(static_cast<bool>(input >> result), "TLAB1 truncated while reading " + description);
     require(result.size() <= 1024, "TLAB1 token exceeds length limit");
     return result;
 }
+
 std::size_t integer_token(const std::string &text, const std::string &description) {
     require(!text.empty(), "TLAB1 empty " + description);
     for (const auto c : text)
@@ -32,6 +35,7 @@ std::size_t integer_token(const std::string &text, const std::string &descriptio
             "TLAB1 " + description + " overflows integer range");
     return value;
 }
+
 double real_token(const std::string &text) {
     std::istringstream input(text);
     input.imbue(std::locale::classic());
@@ -41,6 +45,7 @@ double real_token(const std::string &text) {
             "TLAB1 value is not a finite decimal number: " + text);
     return value;
 }
+
 void validate_bundle(const Bundle &bundle) {
     require(bundle.size() <= max_records, "TLAB1 exceeds 10,000 record limit");
     std::size_t total = 0;
@@ -57,16 +62,19 @@ void validate_bundle(const Bundle &bundle) {
             require(std::isfinite(value), "TLAB1 cannot write non-finite value");
     }
 }
+
 const Tensor &record(const Bundle &bundle, const std::string &name) {
     const auto found = bundle.find(name);
     require(found != bundle.end(), "case missing record: " + name);
     return found->second;
 }
+
 std::size_t exact_integer(double value, const std::string &description) {
     require(std::isfinite(value) && value >= 0 && value <= max_values && std::floor(value) == value,
             "case " + description + " must be an exact nonnegative integer within size limit");
     return static_cast<std::size_t>(value);
 }
+
 std::vector<std::size_t> tokens(const Tensor &tensor, std::size_t vocab, const std::string &name) {
     require(tensor.shape().size() == 2, "case " + name + " must have shape [B,L]");
     std::vector<std::size_t> result;
@@ -78,7 +86,9 @@ std::vector<std::size_t> tokens(const Tensor &tensor, std::size_t vocab, const s
     }
     return result;
 }
+
 } // namespace
+
 Bundle read_bundle(std::istream &input) {
     input.imbue(std::locale::classic());
     require(token(input, "magic") == "TLAB1", "file magic must be TLAB1");
@@ -109,6 +119,7 @@ Bundle read_bundle(std::istream &input) {
     require(input.eof(), "TLAB1 failed while reading input stream");
     return bundle;
 }
+
 Bundle read_bundle(const std::string &path) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input)
@@ -119,6 +130,7 @@ Bundle read_bundle(const std::string &path) {
     input.seekg(0);
     return read_bundle(input);
 }
+
 void write_bundle(std::ostream &output, const Bundle &bundle) {
     validate_bundle(bundle);
     output.imbue(std::locale::classic());
@@ -139,6 +151,7 @@ void write_bundle(std::ostream &output, const Bundle &bundle) {
     if (!output)
         throw std::runtime_error("failed writing TLAB1 stream");
 }
+
 void write_bundle(const std::string &path, const Bundle &bundle) {
     validate_bundle(bundle);
     std::ofstream output(path, std::ios::binary);
@@ -149,6 +162,7 @@ void write_bundle(const std::string &path, const Bundle &bundle) {
     if (!output)
         throw std::runtime_error("failed closing output file: " + path);
 }
+
 Bundle make_case(const Transformer &model, const Tensor &src, const Tensor &tgt,
                  const Tensor &labels, double learning_rate) {
     Bundle bundle;
@@ -171,6 +185,7 @@ Bundle make_case(const Transformer &model, const Tensor &src, const Tensor &tgt,
     (void)load_case(bundle);
     return bundle;
 }
+
 Case load_case(const Bundle &bundle) {
     validate_bundle(bundle);
     const auto &configuration = record(bundle, "config");
@@ -207,22 +222,26 @@ Case load_case(const Bundle &bundle) {
          labels = tokens(label, config.vocab_size, "labels");
     require(source.shape()[0] == target.shape()[0] && target.shape() == label.shape(),
             "case batch/target/label shapes differ");
-    const auto batch = source.shape()[0], S = source.shape()[1], T = target.shape()[1];
-    require(S <= config.max_len && T <= config.max_len, "case sequence exceeds config max_len");
+    const auto batch = source.shape()[0], source_length = source.shape()[1],
+               target_length = target.shape()[1];
+    require(source_length <= config.max_len && target_length <= config.max_len,
+            "case sequence exceeds config max_len");
     for (std::size_t b = 0; b < batch; ++b) {
         bool any = false;
-        for (std::size_t t = 0; t < S; ++t)
-            if (src[b * S + t] != config.pad_id)
+        for (std::size_t t = 0; t < source_length; ++t)
+            if (src[b * source_length + t] != config.pad_id)
                 any = true;
         require(any, "case source contains all-PAD sequence");
-        require(tgt[b * T] != config.pad_id, "case target first token is PAD");
+        require(tgt[b * target_length] != config.pad_id, "case target first token is PAD");
     }
     bool any_label = false;
     for (const auto id : labels)
         if (id != config.pad_id)
             any_label = true;
     require(any_label, "case labels are all PAD");
-    return {std::move(model), std::move(src), std::move(tgt), std::move(labels), batch, S, T,
-            rate.data()[0],   bundle};
+    return {std::move(model),  std::move(src), std::move(tgt),
+            std::move(labels), batch,          source_length,
+            target_length,     rate.data()[0], bundle};
 }
+
 } // namespace tlab

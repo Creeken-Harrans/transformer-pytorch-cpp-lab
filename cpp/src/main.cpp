@@ -13,6 +13,7 @@ void usage(std::ostream &out) {
         << "  transformer_cpp train CASE.tlab CHECKPOINT.tlab --steps N\n"
         << "  transformer_cpp generate CASE.tlab --bos ID --eos ID --max-new-tokens N\n";
 }
+
 std::size_t unsigned_option(const std::string &text, const std::string &name) {
     if (text.empty())
         throw std::invalid_argument(name + " requires a nonnegative integer");
@@ -25,6 +26,7 @@ std::size_t unsigned_option(const std::string &text, const std::string &name) {
         throw std::invalid_argument(name + " integer is out of range");
     return value;
 }
+
 std::map<std::string, std::size_t> options(int argc, char **argv, int first) {
     if ((argc - first) % 2 != 0)
         throw std::invalid_argument("every option needs a value");
@@ -36,6 +38,7 @@ std::map<std::string, std::size_t> options(int argc, char **argv, int first) {
     }
     return result;
 }
+
 void inspect(tlab::Case &fixture, const std::string &path) {
     auto prediction = fixture.model.forward(fixture.src, fixture.batch, fixture.source_length,
                                             fixture.tgt, fixture.target_length);
@@ -44,6 +47,7 @@ void inspect(tlab::Case &fixture, const std::string &path) {
     tlab::Bundle output = prediction.traces;
     output.emplace("logits", prediction.logits);
     output.emplace("loss", loss);
+    // 显式新建 Tensor，导出本次梯度数值；普通 Tensor 拷贝只会共享参数节点。
     for (const auto &pair : fixture.model.parameters)
         output.emplace("grad." + pair.first, tlab::Tensor(pair.second.shape(), pair.second.grad()));
     fixture.model.sgd(fixture.learning_rate);
@@ -52,12 +56,14 @@ void inspect(tlab::Case &fixture, const std::string &path) {
                        tlab::Tensor(pair.second.shape(), pair.second.data()));
     tlab::write_bundle(path, output);
 }
+
 double objective(const tlab::Case &fixture) {
     auto prediction = fixture.model.forward(fixture.src, fixture.batch, fixture.source_length,
                                             fixture.tgt, fixture.target_length);
     return tlab::cross_entropy(prediction.logits, fixture.labels, fixture.model.config.pad_id)
         .data()[0];
 }
+
 void train(tlab::Case &fixture, const std::string &path, std::size_t steps) {
     const double initial = objective(fixture);
     for (std::size_t step = 0; step < steps; ++step) {
@@ -77,7 +83,9 @@ void train(tlab::Case &fixture, const std::string &path, std::size_t steps) {
     std::cout << std::setprecision(17) << "steps=" << steps << " initial_loss=" << initial
               << " final_loss=" << final << '\n';
 }
+
 } // namespace
+
 int main(int argc, char **argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--help") {

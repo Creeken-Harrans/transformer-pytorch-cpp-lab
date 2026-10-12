@@ -4,6 +4,11 @@
 `parents` 与 `propagate` 回调。下文的上游梯度记为 `g` 或 `dY`。
 对应代码中的 `+=` 表示把这个子节点的贡献加到父节点上。
 
+阅读时先在 [tensor.hpp](include/tlab/tensor.hpp) 核对输入输出形状，再在
+[tensor.cpp](src/tensor.cpp) 找同名函数；各函数先做 forward，随后登记回调。
+建议先读 Linear，再读 LayerNorm 和 attention，最后回到 `Tensor::backward`
+看这些局部导数如何由 DAG 串起来。运行与模型调用示例见 [README.md](README.md)。
+
 ## 1. DAG 和链式法则
 
 若 `z = a+a`，`a=2x`，则 `dz/dx=4`。同一个 `a` 出现两次，但只有一个节点。
@@ -11,16 +16,26 @@
 若把 `+=` 改为 `=`，重复边、残差边、共享 encoder memory 和重复词都会出错。
 
 `backward()` 先做后序 DFS，得到「父节点在前、输出在后」的拓扑列表。
-它把本图全部节点的梯度清零，设置标量输出的梯度为 1，然后逆序执行回调。
+它接受一个元素的输出（`numel==1`，不限于 rank=1），把从输出可达的全部节点
+梯度清零，设置输出梯度为 1，然后逆序执行回调。
 visited 集合确保共享节点只执行一次，执行时各个子节点已经积累完上游贡献。
+清零与路径累加是两个阶段：`+=` 累加的是本次 backward 的多个子路径，
+不同 backward 调用不会在这个子图上累积梯度，未参与输出的节点则不会被清零。
 
+`Tensor` 是共享节点的句柄，`auto b = a` 会共享 `data`、`grad` 与 `parents`。
+需要独立数值时使用 `Tensor(a.shape(), a.data())`，它创建没有 parents 的新叶节点。
 节点只向祖先保存 `shared_ptr`。回调从 `Node& out` 参数读取输出梯度，
 不捕获输出自身。训练循环离开作用域后，中间节点和保存的 softmax 结果被释放；
 模型的参数叶节点仍由 `parameters` 持有。
 
+forward 后、backward 前必须保持图中数值不变。Linear、ReLU 等回调会读取
+父节点 `data`，LayerNorm 和 attention 还保存归一化值或概率；原地修改参数后
+继续沿旧图 backward 会混用旧缓存和新参数。SGD 之后应重新 forward 构图。
+
 ## 2. Linear 和 embedding
 
-把 `[B,L,I]` 的前两维合并为行数 `R=B*L`：
+Linear 接受 `X[...,I]`：把任意前缀维合并为行数 R，输出保留前缀、最后一维改为 O。
+模型里常见的 `[B,L,I]` 对应 `R=B*L`；权重始终为 `[O,I]`，bias 为 `[O]`：
 
 $$
 Y_{ro}=\sum_i X_{ri}W_{oi}+b_o.
@@ -62,13 +77,17 @@ dx_d=r\left[u_d-\frac1D\sum_j u_j
               -\hat x_d\frac1D\sum_j u_j\hat x_j\right].
 $$
 
-回调保存 `xhat` 与 `r`，每行先算 `sum(u)` 和 `sum(u*xhat)`，再计算 dx。
+回调保存 `xhat` 与 `r`；代码里的 `inverse_std` 对应 r，循环索引 r 则表示行号。
+每行先算 `sum_u=sum(u)` 和 `sum_u_xhat=sum(u*xhat)`，并累加 affine 参数梯度，
+再把这两个行内和代入 dx。
 这里方差除以 D，而非 D−1；epsilon 位于平方根内部。
 若一行所有值相同，归一化输出为零，affine 输出恰为 beta；epsilon 仍保证导数有限。
 
 ## 4. 注意力的 forward
 
-一头的输入形状：Q 为 `[Q,d_h]`，K/V 为 `[K,d_h]`，Q 和 K 允许不同长度。
+完整输入形状为 Q `[B,Lq,D]`、K/V `[B,Lk,D]`；mask 为 `[B,Lq,Lk]`，
+True（非零）允许参加注意力，并在所有 head 上共享。一头的 Q 为 `[Lq,d_h]`，
+K/V 为 `[Lk,d_h]`，Lq 和 Lk 允许不同。
 每头各自计算：
 
 $$
@@ -80,7 +99,9 @@ $$
 若某一行没有允许的 key，直接报错，不制造 NaN。
 
 C++ 把最后一维 D 看成 `[H,d_h]`，第 h 头的输入索引为
-`(b*L+t)*D+h*d_h+d`。P 的物理形状为 `[B,H,Q,K]`。
+`(b*L+t)*D+h*d_h+d`。P 的物理形状为 `[B,H,Lq,Lk]`，
+`probability_row` 指向固定 `(b,h,query)` 的第一条 key。
+forward 先在 `probabilities` 中暂存允许位置的 score，再原地改写为 P，最后加权 V。
 这是一整个自定义算子，因此不必为每次标量乘法建立节点；公式仍与逐算子 autograd 相同。
 
 ## 5. 注意力的 backward
@@ -98,7 +119,8 @@ $$
 dS_j=P_j\left(dP_j-\sum_l P_l dP_l\right).
 $$
 
-所以无须保存 `[K,K]` 的 Jacobian，只需一条长度 K 的 `dp` 和一个加权和。
+所以无须保存 `[Lk,Lk]` 的 Jacobian，只需一条长度 Lk 的 `probability_grad`（dP）
+和一个加权和 `mean_probability_grad=sum_l P_l*dP_l`。
 mask 位置 P=0，故 dS=0；它不会给 Q/K 或 V 引入梯度。
 最后沿缩放点积返回：
 
@@ -106,7 +128,7 @@ $$
 dQ=dS K/\sqrt{d_h},\qquad dK=dS^T Q/\sqrt{d_h}.
 $$
 
-代码把 `1/sqrt(d_h)` 合入 `ds`，然后同时加到 q.grad 和 k.grad。
+代码把 `1/sqrt(d_h)` 合入 `scaled_score_grad`，然后同时加到 q.grad 和 k.grad。
 模型外层的 Q/K/V/O 四个 projection 都通过普通 Linear 回传。
 self-attention 的三条投影最终回到同一个输入，cross-attention 的 K/V 都回到
 encoder memory；DAG 的累加规则自动处理这些共享路径。
@@ -129,7 +151,7 @@ $$
 \frac{p_{rc}-\mathbf 1[c=label_r]}N.
 $$
 
-PAD 行的梯度是零。N=0 时拒绝输入。最后 SGD 更新
+PAD 行的梯度是零；代码中的 `valid_tokens` 对应 N。N=0 时拒绝输入。最后 SGD 更新
 `theta -= learning_rate*theta.grad`；更新前检查所有候选值是否有限。
 
 ## 7. 数值验证

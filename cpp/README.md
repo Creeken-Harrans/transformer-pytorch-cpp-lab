@@ -89,28 +89,51 @@ uv run --project python transformer-lab generate .artifacts/cpp-trained.tlab --b
 | `src/main.cpp` | 三个 CLI 命令及错误报告 |
 | `tests/` | 数值、模型、序列化和进程级测试 |
 
+第一次读源码可按下面三步推进：
+
+1. 先对照 [tensor.hpp](include/tlab/tensor.hpp) 的形状契约与
+   [tensor.cpp](src/tensor.cpp) 的 `linear`：前缀维变成 rows，最后一维是通道。
+2. 再读 `layer_norm` 与 `attention`，同时对照 [AUTOGRAD.md](AUTOGRAD.md)
+   的公式。注意力的循环标出 score、稳定 softmax、加权 V 三步，反向沿相反方向返回。
+3. 最后读 [model.cpp](src/model.cpp) 的 `Transformer::forward`：先构造 mask，
+   再串起 encoder、decoder 与词表投影。`src/main.cpp::train` 展示图的完整寿命。
+
 张量的最后一维连续。例如 `[B,L,D]` 的元素 `(b,t,d)` 位于
 `(b*L+t)*D+d`。Linear 权重存为 `[out,in]`，所以每个 token 的 forward 是
 `y_o = sum_i x_i*W_oi + b_o`，与 PyTorch `nn.Linear` 的权重方向一致。
+它也接受 `[I]`、`[R,I]` 等输入：所有前缀维都并入 rows，输出保留前缀、替换最后一维。
 多头注意力在最后一维解释 `[H,d_h]`，每个 head 的 `d_h=D/H` 个元素连续。
+Q 为 `[B,Lq,D]`，K/V 为 `[B,Lk,D]`，输出为 `[B,Lq,D]`；cross-attention
+允许 `Lq != Lk`。mask 为展平的 `[B,Lq,Lk]`，True（非零）表示允许，并在所有 head 上共享。
 
 `Tensor` 拷贝共享同一个 `Node`，用来表达残差和同一参数的复用。
+因此 `auto copy = original` 后修改 `copy.data()`，也会改变 `original.data()`。
 需要数值快照时显式执行 `Tensor(original.shape(), original.data())`；
 `make_case` 已对模型参数和 batch 做深拷贝。
 `Node::parents` 和回调只持有祖先节点，不持有输出节点，避免共享指针所有权环。
 
-一次训练的库级调用方式：
+训练的库级调用方式如下；每轮的局部输出离开作用域后，中间图随之释放：
 
 ```cpp
 auto fixture = tlab::load_case(tlab::read_bundle("case.tlab"));
-auto prediction = fixture.model.forward(
-    fixture.src, fixture.batch, fixture.source_length, fixture.tgt, fixture.target_length);
-auto loss = tlab::cross_entropy(prediction.logits, fixture.labels, fixture.model.config.pad_id);
-loss.backward();
-fixture.model.sgd(fixture.learning_rate);
+for (std::size_t step = 0; step < 2; ++step) {
+    auto prediction = fixture.model.forward(
+        fixture.src, fixture.batch, fixture.source_length, fixture.tgt, fixture.target_length);
+    auto loss = tlab::cross_entropy(
+        prediction.logits, fixture.labels, fixture.model.config.pad_id);
+    loss.backward();
+    fixture.model.sgd(fixture.learning_rate);
+}
 ```
 
-参数更新后，下一步重新 forward。不要保留旧 DAG 再把它当作新参数的计算图。
+`backward()` 接受一个元素的输出（`numel==1`），先清零全部可达节点的梯度，
+再将输出梯度设为 1；同一次调用的共享路径通过 `+=` 累加。
+因此上面的循环无需另调 `zero_grad`，不同 `backward()` 调用也不会积累上一轮梯度。
+未参与本次输出的节点不在这个清零范围内。
+
+从 forward 到 backward 之间，输入和参数数值必须保持不变：部分回调直接读取
+父节点 `data`，另外一些读取 forward 保存的缓存。SGD 原地改动参数、保留梯度，
+会使旧图的数值与缓存不再匹配；下一训练步必须重新 forward，再 backward。
 
 ## 文件与输入边界
 

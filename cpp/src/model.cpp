@@ -10,7 +10,9 @@ void require(bool okay, const std::string &message) {
     if (!okay)
         throw std::invalid_argument(message);
 }
+
 } // namespace
+
 void Config::validate() const {
     require(vocab_size > 0 && d_model > 0 && num_heads > 0 && d_ff > 0 && num_encoder_layers > 0 &&
                 num_decoder_layers > 0 && max_len > 0,
@@ -31,6 +33,7 @@ void Config::validate() const {
                               num_decoder_layers * (8 * D * D + 2 * F * D + 15 * D + F);
     require(total <= 10000000, "config exceeds 10,000,000 total parameter elements");
 }
+
 Transformer::Transformer(Config configuration, std::uint32_t seed) : config(configuration) {
     config.validate();
     std::mt19937 generator(seed);
@@ -81,6 +84,7 @@ Transformer::Transformer(Config configuration, std::uint32_t seed) : config(conf
     }
     linear_parameters("generator", config.d_model, config.vocab_size);
 }
+
 void Transformer::validate_tokens(const std::vector<std::size_t> &ids, std::size_t batch,
                                   std::size_t length, bool source) const {
     require(length <= config.max_len, "sequence length exceeds config max_len");
@@ -98,6 +102,7 @@ void Transformer::validate_tokens(const std::vector<std::size_t> &ids, std::size
             require(ids[b * length] != config.pad_id, "target first token must not be PAD");
     }
 }
+
 Tensor Transformer::embed(const std::vector<std::size_t> &ids, std::size_t batch,
                           std::size_t length, const std::string &prefix) const {
     auto embeddings = scale(embedding(parameters.at(prefix + ".weight"), ids, batch, length),
@@ -117,6 +122,7 @@ Tensor Transformer::embed(const std::vector<std::size_t> &ids, std::size_t batch
             }
     return add(embeddings, positions);
 }
+
 Tensor Transformer::multi_head(const Tensor &query, const Tensor &memory,
                                const std::vector<unsigned char> &mask,
                                const std::string &prefix) const {
@@ -124,24 +130,31 @@ Tensor Transformer::multi_head(const Tensor &query, const Tensor &memory,
         return linear(x, parameters.at(prefix + "." + name + "_proj.weight"),
                       parameters.at(prefix + "." + name + "_proj.bias"));
     };
+    // self-attention 中 query/memory 共享节点；cross-attention 中它们的长度可以不同。
     auto q = projection(query, "q"), k = projection(memory, "k"), v = projection(memory, "v");
     return projection(attention(q, k, v, config.num_heads, mask), "out");
 }
+
 Tensor Transformer::norm(const Tensor &x, const std::string &prefix) const {
     return layer_norm(x, parameters.at(prefix + ".weight"), parameters.at(prefix + ".bias"),
                       config.eps);
 }
+
 Tensor Transformer::ffn(const Tensor &x, const std::string &prefix) const {
     auto hidden = relu(linear(x, parameters.at(prefix + ".linear1.weight"),
                               parameters.at(prefix + ".linear1.bias")));
     return linear(hidden, parameters.at(prefix + ".linear2.weight"),
                   parameters.at(prefix + ".linear2.bias"));
 }
+
 Forward Transformer::forward(const std::vector<std::size_t> &src, std::size_t batch,
                              std::size_t source_length, const std::vector<std::size_t> &tgt,
                              std::size_t target_length) const {
     validate_tokens(src, batch, source_length, true);
     validate_tokens(tgt, batch, target_length, false);
+
+    // 1. mask[B,Lq,Lk] 的最后一维指向 key；PAD query 仍允许产生输出。
+    // encoder/cross 屏蔽源 PAD key；decoder 再屏蔽未来的目标 key。
     std::vector<unsigned char> encoder_mask(numel({batch, source_length, source_length}));
     std::vector<unsigned char> decoder_mask(numel({batch, target_length, target_length}));
     std::vector<unsigned char> cross_mask(numel({batch, target_length, source_length}));
@@ -159,6 +172,8 @@ Forward Transformer::forward(const std::vector<std::size_t> &src, std::size_t ba
                     (src[b * source_length + k] != config.pad_id);
         }
     }
+
+    // 2. encoder：源 embedding+PE -> self-attention -> FFN，两个 sublayer 均 Post-LN。
     std::map<std::string, Tensor> traces;
     auto memory = embed(src, batch, source_length, "src_embedding");
     for (std::size_t i = 0; i < config.num_encoder_layers; ++i) {
@@ -170,6 +185,9 @@ Forward Transformer::forward(const std::vector<std::size_t> &src, std::size_t ba
         traces.emplace(prefix + ".output", memory);
     }
     traces.emplace("encoder_output", memory);
+
+    // 3. decoder：目标 embedding+PE -> causal self-attention -> cross-attention -> FFN。
+    // 每层复用同一 encoder memory，反向把所有 K/V 路径的梯度累加到它。
     auto output = embed(tgt, batch, target_length, "tgt_embedding");
     for (std::size_t i = 0; i < config.num_decoder_layers; ++i) {
         const auto prefix = "decoder." + std::to_string(i);
@@ -182,9 +200,12 @@ Forward Transformer::forward(const std::vector<std::size_t> &src, std::size_t ba
         traces.emplace(prefix + ".output", output);
     }
     traces.emplace("decoder_output", output);
+
+    // 4. 逐 token 投影到词表：[B,T,D] -> [B,T,V]；traces 保留各层输出节点。
     return {linear(output, parameters.at("generator.weight"), parameters.at("generator.bias")),
             std::move(traces)};
 }
+
 void Transformer::sgd(double learning_rate) {
     require(std::isfinite(learning_rate) && learning_rate > 0,
             "SGD learning rate must be finite and positive");
@@ -196,7 +217,9 @@ void Transformer::sgd(double learning_rate) {
     for (auto &pair : parameters)
         for (std::size_t i = 0; i < pair.second.size(); ++i)
             pair.second.data()[i] -= learning_rate * pair.second.grad()[i];
+    // grad 保留供 inspect 等调用者读取；旧图缓存与更新后的参数已不再匹配。
 }
+
 std::vector<std::vector<std::size_t>> Transformer::generate(const std::vector<std::size_t> &src,
                                                             std::size_t batch,
                                                             std::size_t source_length,
@@ -216,6 +239,7 @@ std::vector<std::vector<std::size_t>> Transformer::generate(const std::vector<st
         tokens.reserve(batch * length);
         for (const auto &row : result)
             tokens.insert(tokens.end(), row.begin(), row.end());
+        // 每步重算完整 prefix；只用最后一个位置的 logits 选下一个 token。
         auto prediction = forward(src, batch, source_length, tokens, length);
         bool all_finished = true;
         for (std::size_t b = 0; b < batch; ++b) {
@@ -238,4 +262,5 @@ std::vector<std::vector<std::size_t>> Transformer::generate(const std::vector<st
     }
     return result;
 }
+
 } // namespace tlab

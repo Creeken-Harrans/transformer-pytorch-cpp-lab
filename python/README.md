@@ -10,6 +10,7 @@ autograd；attention、LayerNorm、位置编码、mask 和 cross-entropy 都在�
 
 ```bash
 uv sync --locked
+uv run --locked python examples/walkthrough.py
 uv run transformer-lab --help
 uv run pytest
 uv run ruff check .
@@ -40,7 +41,7 @@ uv run transformer-lab generate trained.tlab --bos 1 --eos 2 --max-new-tokens 8
 
 `--task reverse` 将内容逆序后作为目标。`--sequence-length` 是最长**内容**长度；
 实际 src/tgt/labels 长度均为它加一，以容纳 BOS 或 EOS。batch 内各条内容长度
-依次减小，因此默认 batch=2、内容长度=4 的 case 包含 PAD。
+从该值递减到 1 后循环，因此默认 batch=2、内容长度=4 的 case 包含 PAD。
 内容 token 从词表中排除 PAD、BOS、EOS 后采样。特殊 token 可以修改，例如：
 
 ```bash
@@ -62,6 +63,7 @@ uv run transformer-lab generate custom.tlab --bos 0 --eos 1 --max-new-tokens 8
 
 | 文件 | 先观察的公式或约定 |
 | --- | --- |
+| `examples/walkthrough.py` | 真实 token → mask → 注意力概率 → 层边界 → loss/backward/SGD |
 | `src/transformer_lab/model.py` | 位置编码 → `scaled_dot_product_attention` → `MultiHeadAttention` → LayerNorm → encoder/decoder → loss |
 | `src/transformer_lab/cli.py` | `toy_batch` 的目标右移、`inspect_case` 的 backward/SGD、`train_case` 的梯度清空 |
 | `src/transformer_lab/format.py` | double 的 17 位有效数字、row-major 排列、严格 shape 与 token 校验 |

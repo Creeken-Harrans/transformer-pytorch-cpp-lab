@@ -1,6 +1,6 @@
 # 贡献指南
 
-欢迎改进数学解释、代码可读性、错误检查和教学实验。提交前先阅读 [DESIGN.md](DESIGN.md) 的数值契约与 [LEARNING.md](LEARNING.md) 的阅读路线，确保改动在两套实现中表达同一个模型。
+欢迎改进数学解释、代码可读性、错误检查和教学实验。先阅读 [DESIGN.md](DESIGN.md) 的数值契约，并按[学习指南第 8 节](LEARNING.md#8-代码阅读路线)找到对应函数；涉及数学或接口的改动需让两套实现保持一致。
 
 ## 先确定改动解决什么问题
 
@@ -10,33 +10,25 @@
 
 ## 本地检查
 
-在根目录运行：
+首次运行的工具与环境要求见根目录 [README.md](README.md#先运行再读代码)。以下命令都在仓库根目录执行：
+
+| 命令 | 用途 |
+|---|---|
+| `make help` | 查看所有入口与阅读路线 |
+| `make walkthrough` | 观察一次实际 forward、backward 与 SGD，核对文档中的形状和 mask |
+| `make lint` | Python 静态检查与格式检查 |
+| `make test` | Python 与 C++ 各自的测试 |
+| `make parity` | 跨语言 forward、backward、SGD、checkpoint 与生成对照 |
+| `make demo` | 固定小批次的复制训练与交叉加载演示 |
+| `make check` | 汇总 lint、test 与 parity，提交前运行 |
+
+需要保存跨语言验证的完整证据时：
 
 ```bash
-make check
+uv run --locked --project python python verify.py --json-output .artifacts/validation.json
 ```
 
-也可按改动范围先做针对性检查：
-
-```bash
-# 两套实现各自的测试
-make test
-
-# Python 静态检查与格式检查
-make lint
-
-# 跨语言 forward、backward、SGD 与生成对照
-make parity
-
-# 小批次复制任务的训练与交叉加载演示
-make demo
-```
-
-直接运行跨语言验证器的等价入口：
-
-```bash
-uv run --locked --project python python verify.py
-```
+默认终端输出便于阅读的检查表；`--json` 提供可解析的 JSON stdout。报告 PR 数值结果时，注明 case、比较对象和误差字段，保留比较条件。
 
 C++ 构建与 CTest 可单独运行：
 
@@ -54,7 +46,7 @@ ctest --test-dir cpp/build --output-on-failure
 
 模型行为测试应覆盖实际约束，例如未来 token 不影响早期 logits、源 PAD 不影响有效输出、重复父节点正确累加、全 PAD labels 被拒绝、不同源/目标长度可运行，以及 EOS 后的 batch 行为。随机测试使用固定种子；跨语言测试读取同一组权重，而非分别初始化。
 
-不要为了通过测试放宽统一的数值容差。先报告差异最大的记录和元素，再沿形状、mask、广播、transpose、归一化和梯度累加定位原因。改变精度或算法的实验，应单独说明它的比较目标。
+跨语言比较遵守[学习指南第 7 节](LEARNING.md#7-怎样判断实现可信)的统一容差。超出容差时，先报告差异最大的记录和元素，再沿形状、mask、广播、transpose、归一化和梯度累加定位原因。改变精度或算法的实验，单独说明比较目标与容差依据。
 
 ## 注释与文档
 

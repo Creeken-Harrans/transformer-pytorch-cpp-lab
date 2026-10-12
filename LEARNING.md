@@ -2,7 +2,26 @@
 
 这份指南按一次训练所经过的路径组织：准备 token → 嵌入与位置编码 → encoder → decoder → loss → backward → SGD；最后再把 teacher forcing 换成逐 token 生成。Python 和 C++ 遵循 [DESIGN.md](DESIGN.md) 中的同一数学与文件契约。
 
-建议先运行根目录的 `make check` 与 `make demo`，然后选一组很小的配置阅读代码。默认 `D=8, H=2, F=16` 足以跟踪全部张量，也能让 C++ 的循环和手写梯度保持可读。
+先在根目录运行 `make help`、`make demo` 和 `make check`。需要逐项观察一次训练时，运行 `make walkthrough`，打开 [`python/examples/walkthrough.py`](python/examples/walkthrough.py) 对照输出。默认模型的 `D=8, H=2, F=16` 适合跟踪张量；walkthrough 将词表缩为 `V=8`，展开一个实际训练步。
+
+第一次阅读可走三条路线：
+
+- **理解前向与数据：** 第 1 节的右移数据 → 第 2 节的形状与公式 → 第 3 节的 mask，再对照 walkthrough 输出。
+- **推导手写梯度：** 第 4 节的局部 backward → 第 8 节的算子入口 → 第 9 节的梯度实验。
+- **核对一次完整实验：** 第 5 节的生成 → 第 6 节的文件 → 第 7 节的验证，再拆开运行根目录 README 的命令。
+
+目录：
+
+1. [先把形状和训练数据对齐](#1-先把形状和训练数据对齐)
+2. [沿着一条前向路径读模型](#2-沿着一条前向路径读模型)
+3. [mask：先明确轴，再明确含义](#3-mask先明确轴再明确含义)
+4. [C++ 的 backward：把链式法则落实到每个算子](#4-c-的-backward把链式法则落实到每个算子)
+5. [从训练切换到 greedy decode](#5-从训练切换到-greedy-decode)
+6. [TLAB1：让两套实现做同一个实验](#6-tlab1让两套实现做同一个实验)
+7. [怎样判断实现可信](#7-怎样判断实现可信)
+8. [代码阅读路线](#8-代码阅读路线)
+9. [可以立即做的实验](#9-可以立即做的实验)
+10. [学完核心以后再扩展](#10-学完核心以后再扩展)
 
 ## 1. 先把形状和训练数据对齐
 
@@ -22,13 +41,18 @@ token ID 是整数，范围为 `[0,V)`。`PAD=0`、`BOS=1`、`EOS=2` 是演示�
 
 ### teacher forcing：输入右移，label 不右移
 
-设一条源序列是 `[4,7,5]`，希望输出同一条序列并结束。训练时构造：
+用两条内容 `[4,7,5]` 和 `[6,4]` 说明 [`toy_batch`](python/src/transformer_lab/cli.py) 的复制任务构造规则。源末尾加入 EOS，目标输入在内容前加入 BOS，labels 在内容后加入 EOS；短序列在尾部补 PAD：
 
 ```text
-src     = [4,   7, 5]
-tgt     = [BOS, 4, 7, 5]
-labels  = [4,   7, 5, EOS]
+src     = [[4,   7, 5, EOS],
+           [6,   4, EOS, PAD]]
+tgt     = [[BOS, 4, 7, 5],
+           [BOS, 6, 4, PAD]]
+labels  = [[4,   7, 5, EOS],
+           [6,   4, EOS, PAD]]
 ```
+
+这里 `B=2`、`S=T=4`，loss 使用 7 个非 PAD labels。`--sequence-length` 指最长内容长度，导出的 `src/tgt/labels` 再多一个位置容纳 BOS 或 EOS。各样本的内容长度按 batch 序号从最长长度递减到 1，然后重复这一循环；`--task reverse` 只将目标内容逆序。
 
 `logits[:,t,:]` 对应 `labels[:,t]`。在位置 `t`，decoder 已知 `tgt` 中截至 `t` 的 token，预测它后面的一个 token。BOS 给第一步提供输入，EOS 也是一个需要预测的普通类别。变长序列按批次补 PAD；`tgt` 与 `labels` 必须具有相同的 `[B,T]` 形状。
 
@@ -44,7 +68,9 @@ loss.backward()
 parameter -= learning_rate * gradient
 ```
 
-一次 `inspect` 正好覆盖这个流程，但将前向值、梯度和更新后的权重写入文件，方便另一套实现逐项核对。`train` 重复这个流程，演示始终使用 case 里保存的固定小批次。
+`inspect` 将这一步的前向值、梯度和更新后权重写入文件，供另一套实现逐项核对。`train` 每一步清空旧梯度，重复使用 case 中的固定小批次。对应 Python 的 [`inspect_case`、`train_case`](python/src/transformer_lab/cli.py)；C++ 从 [`main.cpp`](cpp/src/main.cpp) 进入模型与算子。
+
+`make walkthrough` 会直接打印实际 token、允许矩阵、第一层 encoder 的注意力概率、各层形状、有效 label 数、loss、输出投影的梯度范数和一步更新后的 loss。先确认 PAD key 的概率为 0，再把每个形状代入下面的公式。
 
 ## 2. 沿着一条前向路径读模型
 
@@ -77,7 +103,9 @@ PE_{p,2i}=\sin\!\left(p/10000^{2i/D}\right),\qquad
 PE_{p,2i+1}=\cos\!\left(p/10000^{2i/D}\right).
 $$
 
-位置编码由公式生成，保持 `[max_len,D]`，没有可训练参数；`TLAB1` 也不保存它。`max_len` 限制可接受的输入与生成前缀长度。若 `D` 为奇数，最后一个维度只取其对应的正弦项。这些公式与下面的注意力、FFN 结构可对照原论文第 3 节：[Attention Is All You Need](https://arxiv.org/abs/1706.03762)。
+位置编码没有可训练参数，`TLAB1` 不保存它；Python 缓存 `[max_len,D]` 位置表，C++ 在 `Transformer::embed` 中按实际位置计算。`max_len` 限制可接受的输入与生成前缀长度。若 `D` 为奇数，最后一个维度只取其对应的正弦项。这些公式与下面的注意力、FFN 结构可对照原论文第 3 节：[Attention Is All You Need](https://arxiv.org/abs/1706.03762)。
+
+代码入口：Python [`sinusoidal_position_encoding`、`Transformer._embed`](python/src/transformer_lab/model.py)；C++ [`Transformer::embed`](cpp/src/model.cpp) 调用 [`embedding`、`scale`、`add`](cpp/src/tensor.cpp)。
 
 ### 2.2 线性投影与多头布局
 
@@ -109,7 +137,9 @@ attention 公式中的 `V` 表示 value 矩阵，形状为 `[B,H,L_k,d_h]`；它
 | decoder self-attention | 当前 decoder 表示 | 同一表示 | `[B,H,T,T]` |
 | decoder cross-attention | decoder self-attention 后的表示 | encoder 最终 memory | `[B,H,T,S]` |
 
-cross-attention 的 query 轴和 key 轴属于不同序列，`S` 与 `T` 可以不同；这也是验证器必须覆盖不同源/目标长度的原因。
+cross-attention 的 query 轴和 key 轴属于不同序列，`S` 与 `T` 可以不同；验证器会覆盖不同源/目标长度。
+
+代码入口：Python [`MultiHeadAttention._split_heads`、`MultiHeadAttention.forward`、`scaled_dot_product_attention`](python/src/transformer_lab/model.py)；C++ [`Transformer::multi_head`](cpp/src/model.cpp) 与 [`attention`](cpp/src/tensor.cpp)。先核对投影和拆头，再核对 softmax 的 key 轴。
 
 ### 2.3 Post-LN、残差与 FFN
 
@@ -151,6 +181,8 @@ $$
 
 这里使用总体方差，分母为 `D`，`eps` 位于平方根内部。`gamma`、`beta` 都是 `[D]` 的可学习参数。PyTorch 的 `LayerNorm` 使用相同的方差约定，可查看 [官方说明](https://docs.pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html)。
 
+代码入口：Python [`EncoderLayer.forward`、`DecoderLayer.forward`、`FeedForward.forward`、`ManualLayerNorm.forward`](python/src/transformer_lab/model.py)；C++ [`Transformer::forward`、`ffn`、`norm`](cpp/src/model.cpp) 与 [`layer_norm`](cpp/src/tensor.cpp)。
+
 ### 2.4 logits、稳定交叉熵与 SGD
 
 最终输出投影使用 `generator.weight[V,D]` 与 `generator.bias[V]`，得到 logits `[B,T,V]`。模型返回 logits，loss 内部再进行稳定的 log-sum-exp 计算。
@@ -164,7 +196,7 @@ $$
 
 实现时先减去该行最大值，避免直接 `exp(logit)` 溢出。均值除以非 PAD token 的数量，而非 `B*T`；所有 labels 都是 PAD 时拒绝计算，避免无意义的除零。
 
-一次 SGD 更新是 `theta ← theta - learning_rate * grad`。这里没有 momentum、weight decay、梯度裁剪或学习率调度，更新文件可直接用这条公式检查。
+一次 SGD 更新是 `theta ← theta - learning_rate * grad`。这里没有 momentum、weight decay、梯度裁剪或学习率调度，更新文件可直接用这条公式检查。代码入口是 Python [`masked_cross_entropy`](python/src/transformer_lab/model.py)、[`train_case`](python/src/transformer_lab/cli.py)，以及 C++ [`cross_entropy`](cpp/src/tensor.cpp)、[`Transformer::sgd`](cpp/src/model.cpp)。
 
 ## 3. mask：先明确轴，再明确含义
 
@@ -195,7 +227,22 @@ decoder:    allowed[b,i,j] = (j <= i) and (tgt[b,j] != PAD)
 cross:      allowed[b,i,j] = src[b,j] != PAD
 ```
 
-这里 `j` 是 key 位置。PAD query 的输出可以存在，模型也不强制把它归零；监督由 label mask 决定。有效 query 应无法通过 attention 读取 PAD key，cross-attention 也必须屏蔽源 PAD。
+这里 `j` 是 key 位置。PAD query 的输出可以存在，监督由 label mask 决定。有效 query 无法通过 attention 读取 PAD key，cross-attention 同样屏蔽源 PAD。
+
+对第 1 节的第二条样本，source mask 在所有 encoder/cross-attention query 上都是 `[1,1,1,0]`；EOS 位置仍可读取。`tgt=[BOS,6,4,PAD]` 的因果与 PAD 交集为：
+
+```text
+        key: BOS 6 4 PAD
+query 0       1 0 0 0
+      1       1 1 0 0
+      2       1 1 1 0
+      3       1 1 1 0
+labels有效     1 1 1 0
+```
+
+最后一行 query 仍有允许的 key，却不贡献 loss，因为对应 label 是 PAD。attention key mask 与 loss label mask 分别控制信息来源和监督位置。
+
+代码入口：Python [`Transformer._encode`、`Transformer._decode`](python/src/transformer_lab/model.py) 构造可广播的 `[B,1,1,S]` 与 `[B,1,T,T]` mask；C++ [`Transformer::forward`](cpp/src/model.cpp) 构造 `[B,S,S]`、`[B,T,T]`、`[B,T,S]` 允许数组，并在 attention 的各个 head 共用。
 
 一行若没有任何允许的 key，softmax 没有定义，两个实现都应抛出错误。数据契约要求每条源序列至少有一个非 PAD token，每条目标序列第一个 token 非 PAD，从而为所有因果 query 保留可用的 key。
 
@@ -203,7 +250,7 @@ cross:      allowed[b,i,j] = src[b,j] != PAD
 
 ## 4. C++ 的 backward：把链式法则落实到每个算子
 
-Python 负责展示算子之间的数学关系；C++ 把每个算子的局部梯度显式写出来。先读一个简单线性层，再读 softmax 与 LayerNorm，最后读完整 attention。
+Python 展示算子之间的数学关系；C++ 将局部梯度写在 [`tensor.cpp`](cpp/src/tensor.cpp) 中每个算子的 `Node::propagate` 回调里。按 `linear` → `layer_norm` → `attention` → `cross_entropy` 的顺序读，最后回到 `Tensor::backward` 核对遍历与累加。更细的算子推导见 [AUTOGRAD.md](cpp/AUTOGRAD.md)。
 
 以下用上游梯度 `G = ∂L/∂Y` 表示该算子输出收到的梯度。矩阵公式可对每个 batch/head 分别应用；广播发生时，反向传播需要沿被广播的轴求和。
 
@@ -297,7 +344,9 @@ reverse-mode autograd 的步骤是：
 
 返回序列包含 BOS，所以 `max_new_tokens` 限制的是 BOS 后新增的 token 数。EOS 被保留。生成也受 `max_len` 约束，使用时需为前缀留出足够空间。
 
-本实现没有 KV cache，前缀增长时会重新计算相关 attention，便于与训练时的路径对照。greedy 是逐步的局部选择，没有搜索多个候选序列。
+Python [`Transformer.greedy_decode`](python/src/transformer_lab/model.py) 缓存固定的 encoder memory；decoder 未使用 KV cache，前缀增长时重新计算相关 attention。C++ [`Transformer::generate`](cpp/src/model.cpp) 每步调用完整 forward。两者都按当前 logits 的 argmax 选择下一个 token。
+
+第 1 节的复制 batch 若生成正确，返回值为 `[[BOS,4,7,5,EOS], [BOS,6,4,EOS,PAD]]`：第二条先结束，最后一列补 PAD，第一条随后结束。实际预测取决于训练后的权重，可用 `make demo` 观察。
 
 ## 6. TLAB1：让两套实现做同一个实验
 
@@ -343,7 +392,7 @@ Python 的 `pyproject.toml` 声明项目与依赖，`uv.lock` 固定解析版本
 
 ## 7. 怎样判断实现可信
 
-单看 loss 下降，证据很有限。这里使用四类互相补充的检查：
+实现的可信度来自公式、行为、跨语言数值与梯度四类检查。每类检查回答不同的问题：
 
 | 检查 | 能发现什么 | 仍需其他检查补足什么 |
 |---|---|---|
@@ -352,7 +401,9 @@ Python 的 `pyproject.toml` 声明项目与依赖，`uv.lock` 固定解析版本
 | Python / C++ 对照 | encoder/decoder 输出、logits、loss、全部参数梯度、一次 SGD 更新差异 | 两套实现是否犯了同样的概念错误 |
 | 中央有限差分 | backward 是否匹配本实现前向的局部导数 | 前向结构是否符合目标架构 |
 
-官方层仅出现在验证器中，核心实现仍自行组装 attention、FFN、残差和 LayerNorm。验证器还运行多步 SGD，双向读取 checkpoint，检查 greedy 结果与 EOS 提前停止，并要求两套实现拒绝同一组损坏文件和非法 case。
+[`verify.py`](verify.py) 使用官方层核对前向，核心实现自行组装 attention、FFN、残差和 LayerNorm。验证器还运行多步 SGD，双向读取 checkpoint，检查 greedy 结果与 EOS 提前停止，并要求两套实现拒绝同一组损坏文件和非法 case。
+
+根目录的 `make parity` 显示六个 case 的检查表与训练、生成、错误输入摘要。需要完整记录时运行 `uv run --locked --project python python verify.py --json`；也可使用 `--json-output .artifacts/validation.json` 保存报告。先读哪一个 case、哪一种结果超出容差，再沿对应代码入口定位。
 
 float64 的跨语言元素比较采用：
 
@@ -375,19 +426,31 @@ $$
 
 建议按下表逐步阅读，每次只追踪一种张量和它对应的梯度。
 
-| 顺序 | Python | C++ | 阅读目标 |
+| 顺序 | 概念与 Python 入口 | C++ 入口 | 阅读目标 |
 |---|---|---|---|
-| 1 | [`model.py`](python/src/transformer_lab/model.py) 的配置与输入校验 | [`model.hpp`](cpp/include/tlab/model.hpp)、[`model.cpp`](cpp/src/model.cpp) | 明确形状、token 与数值约束 |
-| 2 | `model.py` 的嵌入、位置编码、attention | [`tensor.hpp`](cpp/include/tlab/tensor.hpp)、[`tensor.cpp`](cpp/src/tensor.cpp) 的对应算子 | 对照布局与 Q/K/V 来源 |
-| 3 | `model.py` 的 encoder、decoder、loss | `model.cpp` 的模型组装与 loss | 沿 Post-LN 前向路径读完整网络 |
-| 4 | PyTorch 对应运算的梯度使用 | `tensor.cpp` 的局部 backward 和拓扑遍历 | 推导并检查梯度累加 |
-| 5 | [`format.py`](python/src/transformer_lab/format.py) | [`format.hpp`](cpp/include/tlab/format.hpp)、[`format.cpp`](cpp/src/format.cpp) | 核对命名参数与 TLAB 输入 |
-| 6 | [`cli.py`](python/src/transformer_lab/cli.py) | [`main.cpp`](cpp/src/main.cpp) | 对照 inspect、train 与 generate |
-| 7 | [`python/tests`](python/tests/) | [`cpp/tests`](cpp/tests/) 与 [`verify.py`](verify.py) | 从测试观察正确行为和错误边界 |
+| 1 | 配置：[`TransformerConfig`、`validate_tokens`](python/src/transformer_lab/model.py)；数据：[`toy_batch`](python/src/transformer_lab/cli.py) | [`Config::validate`、`Transformer::validate_tokens`](cpp/src/model.cpp) | 明确 token、形状与数值约束 |
+| 2 | 嵌入与位置：[`sinusoidal_position_encoding`、`Transformer._embed`](python/src/transformer_lab/model.py) | [`Transformer::embed`](cpp/src/model.cpp)、[`embedding`](cpp/src/tensor.cpp) | 追踪查表、缩放与位置相加 |
+| 3 | 注意力：[`MultiHeadAttention`、`scaled_dot_product_attention`](python/src/transformer_lab/model.py)；mask：`Transformer._encode/_decode` | [`Transformer::multi_head`、`Transformer::forward`](cpp/src/model.cpp)、[`attention`](cpp/src/tensor.cpp) | 核对 Q/K/V 来源、head 布局与 key 轴 |
+| 4 | 子层：[`EncoderLayer`、`DecoderLayer`、`ManualLayerNorm`、`FeedForward`](python/src/transformer_lab/model.py) | [`Transformer::forward`、`norm`、`ffn`](cpp/src/model.cpp)、[`add`、`layer_norm`](cpp/src/tensor.cpp) | 沿 Post-LN 读完整网络 |
+| 5 | loss：[`masked_cross_entropy`](python/src/transformer_lab/model.py)；训练：[`inspect_case`、`train_case`](python/src/transformer_lab/cli.py) | [`cross_entropy`、`Tensor::backward`](cpp/src/tensor.cpp)、[`Transformer::sgd`](cpp/src/model.cpp) | 检查有效 token 均值、局部梯度与共享路径累加 |
+| 6 | 文件：[`make_case`、`load_case`、`read_bundle`、`write_bundle`](python/src/transformer_lab/format.py) | [相同名字的格式函数](cpp/src/format.cpp) 与 [`Case`](cpp/include/tlab/format.hpp) | 核对命名参数与 TLAB 输入 |
+| 7 | 生成：[`Transformer.greedy_decode`](python/src/transformer_lab/model.py)；命令：[`cli.py`](python/src/transformer_lab/cli.py) | [`Transformer::generate`](cpp/src/model.cpp)、[`main.cpp`](cpp/src/main.cpp) | 对照 EOS、PAD、生成预算与 checkpoint |
+| 8 | [`python/tests`](python/tests/) | [`cpp/tests`](cpp/tests/) 与 [`verify.py`](verify.py) | 从测试观察正确行为与错误边界 |
 
 阅读代码注释时，尤其留意「最后一个轴是什么」「哪个输入是同一个节点」「哪些维度被广播」这三个问题。多数表面相似的实现差异，都可以沿这些问题定位。
 
 ## 9. 可以立即做的实验
+
+先用第 1 节的两条样本回答这些问题，再在 walkthrough 或 `inspect` 的记录中找到证据：
+
+| 自检问题 | 应能解释的结果 |
+|---|---|
+| 为什么第二条样本的 EOS key 可被读取，PAD key 不可被读取？ | EOS 是非 PAD token；源 mask 为 `[1,1,1,0]`，只屏蔽最后一个 PAD key。 |
+| 第一个目标位置预测什么？ | `tgt[b,0]=BOS` 提供输入，`labels[b,0]` 是该样本的第一个内容 token。 |
+| loss 的分母是 7 还是 8？ | 两条样本共 7 个非 PAD labels；唯一的 PAD label 位置不贡献 loss 或 logits 梯度。 |
+| 为什么 PAD query 不要求全零？ | key mask 限制读取，label mask 限制监督；query 的值可以存在。 |
+| `updated.generator.weight` 如何核对？ | 原始权重减去 `learning_rate * grad.generator.weight`，逐元素比较。 |
+| encoder memory 为什么会收到多路梯度？ | 每层 decoder 的 cross-attention 都使用同一 memory，K/V 两条路径与各层贡献都要累加。 |
 
 ### 实验 A：改变未来 token
 
@@ -419,7 +482,7 @@ $$
 
 **应观察到：** 合理配置下，固定 batch 可以被逐渐拟合；loss 连续变化，而 argmax token 只在类别顺序翻转时变化。生成错误可能在多个位置连锁出现，因为后续输入使用模型自己的预测。
 
-接着单独构造未参与训练的序列，并与训练序列分开统计。**这一步才开始检验泛化**：固定批次拟合成功既不要求未见样本正确，也不证明模型学到了通用复制算法。评估更长序列还需要检查 `max_len` 和长度分布。
+接着单独构造未参与训练的序列，将训练序列和未见序列的准确率分开统计。这一步开始检验泛化；更长序列的评估还需记录 `max_len` 与训练、测试的长度分布。
 
 ### 实验 F：亲手制造一个错误
 
@@ -431,4 +494,4 @@ $$
 
 可以依次尝试新的 toy 数据集、独立验证集、优化器、dropout、beam search、KV cache，再考虑 CUDA 与高性能算子。每次只增加一个机制，并写明它如何改变前向、backward、文件或生成行为。
 
-保留一份原始 float64 实现作为参考，有助于区分算法改变、数值精度差异与性能改写。生产系统中的速度、吞吐量和大规模训练配方，需要另一套评测目标；本仓库首先回答的是「每个值如何算出，每个梯度从何而来」。
+保留原始 float64 实现作为参考，区分算法改变、精度差异与性能改写。扩展到速度、吞吐量或大规模训练时，分别记录硬件、数据、精度、时间统计与质量指标，再与这份数学参考比较。
