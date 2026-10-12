@@ -28,6 +28,8 @@ jobs:
         run: make check
       - name: Run the copy-task learning demo
         run: make demo
+      - name: Run the step-by-step learning walkthrough
+        run: make walkthrough
       - name: Check C++ memory and undefined behavior
         run: |
           cmake -S cpp -B cpp/build-sanitize -DCMAKE_BUILD_TYPE=Debug -DTLAB_ENABLE_SANITIZERS=ON

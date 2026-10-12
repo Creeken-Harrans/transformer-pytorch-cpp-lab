@@ -21,7 +21,7 @@ def toy_batch(
 ) -> tuple[Tensor, Tensor, Tensor]:
     """生成带 padding 的复制/逆序任务，无需外部数据集。
 
-    sequence_length 指最长内容长度，各样本长度按 batch 序号递减。
+    sequence_length 指最长内容长度；各样本长度从该值递减到 1，再循环。
     源=内容+EOS，tgt=BOS+正确输出，labels=正确输出+EOS，三者尾部补 PAD。
     因为 labels 相对 tgt 左移一位，模型在位置 t 学的是下一个 token。
     """
@@ -50,19 +50,19 @@ def toy_batch(
     src, tgt, labels = (
         torch.full(shape, config.pad_id, dtype=torch.long) for _ in range(3)
     )
-    vocabulary = torch.tensor(payload_ids, dtype=torch.long)
-    for batch in range(batch_size):
-        length = sequence_length - (batch % sequence_length)
-        content = vocabulary[
-            torch.randint(len(payload_ids), (length,), generator=generator)
+    content_vocabulary = torch.tensor(payload_ids, dtype=torch.long)
+    for batch_index in range(batch_size):
+        content_length = sequence_length - (batch_index % sequence_length)
+        content = content_vocabulary[
+            torch.randint(len(payload_ids), (content_length,), generator=generator)
         ]
         answer = content if task == "copy" else content.flip(0)
-        src[batch, :length] = content
-        src[batch, length] = eos_id
-        tgt[batch, 0] = bos_id
-        tgt[batch, 1 : length + 1] = answer
-        labels[batch, :length] = answer
-        labels[batch, length] = eos_id
+        src[batch_index, :content_length] = content
+        src[batch_index, content_length] = eos_id
+        tgt[batch_index, 0] = bos_id
+        tgt[batch_index, 1 : content_length + 1] = answer
+        labels[batch_index, :content_length] = answer
+        labels[batch_index, content_length] = eos_id
     return src, tgt, labels
 
 

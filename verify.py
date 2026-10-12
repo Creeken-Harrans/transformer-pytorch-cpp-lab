@@ -144,7 +144,7 @@ def finite_difference(
     """用真实 loss 的中央差分检查完整模型的代表性参数。
 
     两个实现相等仍可能共同犯错；差分提供额外的数学检查。
-    每个参数选择绝对梯度最大的元素，避免落在 ReLU 零梯度区域。
+    每个参数选择绝对梯度最大的元素，减少只检查零梯度元素的情况。
     """
     selectors = (
         "src_embedding.weight",
@@ -480,6 +480,70 @@ def verify_copy_checkpoint(binary: Path, path: Path) -> dict[str, float | int]:
     return {"rows_copied_exactly": src.shape[0], "loss": loss}
 
 
+def emit_report(
+    report: dict,
+    *,
+    json_stdout: bool = False,
+    json_output: Path | None = None,
+    copy_mode: bool = False,
+) -> None:
+    """终端默认显示摘要；完整 JSON 可单独输出，也可同时保存到文件。
+
+    两种验收模式共用此出口，保证 --json-output 在复制任务中也生效。
+    --json 的 stdout 只含 JSON，便于其他程序直接读取。
+    """
+    serialized = json.dumps(report, ensure_ascii=False, indent=2)
+    if json_output is not None:
+        json_output.parent.mkdir(parents=True, exist_ok=True)
+        json_output.write_text(serialized + "\n", encoding="utf-8")
+    if json_stdout:
+        print(serialized)
+        return
+
+    if copy_mode:
+        print("复制任务：交叉读取 checkpoint，逐 token 检查 BOS、内容、EOS 与 PAD。")
+        for path, result in report.items():
+            print(
+                f"  {path}: {result['rows_copied_exactly']} rows, "
+                f"loss={result['loss']:.12g}"
+            )
+        print("PASS: both backends reproduce every copy-task token and stop at EOS.")
+    else:
+        cases = report["cases"]
+        width = max(len("Case"), *(len(name) for name in cases))
+        print(f"{'Case':<{width}}  {'Records':>7}  {'Max abs error':>13}")
+        print(f"{'-' * width}  {'-' * 7}  {'-' * 13}")
+        for name, result in cases.items():
+            print(
+                f"{name:<{width}}  {result['records']:>7}  {result['max_abs_error']:>13.2e}"
+            )
+        finite_error = max(
+            result["finite_difference"]["max_abs_error"] for result in cases.values()
+        )
+        reference_error = max(
+            result["official_pytorch_layer_max_abs_error"] for result in cases.values()
+        )
+        training = report["training_and_generation"]
+        print(f"\n容差：atol={report['atol']:.0e}, rtol={report['rtol']:.0e}")
+        print(f"有限差分最大误差：{finite_error:.2e}")
+        print(f"官方 PyTorch 层参考最大误差：{reference_error:.2e}")
+        print(
+            f"SGD {training['steps']} 步：loss "
+            f"{training['initial_loss']:.8f} → {training['final_loss']:.8f}；"
+            f"checkpoint 最大误差 {training['checkpoint_max_abs_error']:.2e}"
+        )
+        print(
+            f"生成：{training['generation_rows']} 行一致；EOS 后 PAD 检查："
+            f"{'通过' if training['mixed_eos_padding_verified'] else '失败'}"
+        )
+        print(f"错误输入：{report['invalid_cases_rejected_by_both']} 个均被两端拒绝")
+        print(
+            "PASS: layer outputs, losses, all gradients, SGD updates and generation agree."
+        )
+    if json_output is not None:
+        print(f"完整报告：{json_output}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cpp-binary", type=Path, help="Use an existing C++ build")
@@ -492,6 +556,9 @@ def main() -> None:
     parser.add_argument(
         "--json-output", type=Path, help="Optionally save the validation report"
     )
+    parser.add_argument(
+        "--json", action="store_true", help="Print only the full JSON report"
+    )
     args = parser.parse_args()
     torch.set_num_threads(1)
     binary = args.cpp_binary.resolve() if args.cpp_binary else build_cpp()
@@ -500,8 +567,12 @@ def main() -> None:
             str(path): verify_copy_checkpoint(binary, path)
             for path in args.copy_checkpoints
         }
-        print(json.dumps(copy_report, ensure_ascii=False, indent=2))
-        print("PASS: both backends reproduce every copy-task token and stop at EOS.")
+        emit_report(
+            copy_report,
+            json_stdout=args.json,
+            json_output=args.json_output,
+            copy_mode=True,
+        )
         return
     specifications = [
         ("baseline", {}, 2, 4, 4),
@@ -560,12 +631,7 @@ def main() -> None:
                 report["invalid_cases_rejected_by_both"] = verify_rejections(
                     binary, directory, case_path
                 )
-    serialized = json.dumps(report, ensure_ascii=False, indent=2)
-    if args.json_output:
-        args.json_output.parent.mkdir(parents=True, exist_ok=True)
-        args.json_output.write_text(serialized + "\n", encoding="utf-8")
-    print(serialized)
-    print("PASS: layer outputs, losses, all gradients, SGD updates and generation agree.")
+    emit_report(report, json_stdout=args.json, json_output=args.json_output)
 
 
 if __name__ == "__main__":
